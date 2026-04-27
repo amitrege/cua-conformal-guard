@@ -1,7 +1,13 @@
 # Design Notes
 
-For someone who's read the README, has the quickstart running, and wants to
-know what the calibrator is doing under the hood.
+For someone who's read [`CONCEPTS.md`](CONCEPTS.md), has the
+[quickstart](GETTING_STARTED.md) running, and wants to know what the
+calibrator is doing under the hood — the math, the search procedure, and the
+edge cases that drive the warnings.
+
+If you're new to the library, read [`CONCEPTS.md`](CONCEPTS.md) first. This
+doc assumes you already know what `alpha` is and why the threshold is
+calibrated.
 
 ## What the library does
 

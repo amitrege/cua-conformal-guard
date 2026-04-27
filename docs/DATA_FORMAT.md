@@ -1,5 +1,11 @@
 # Data Format
 
+Schema reference for everything the library reads or writes: labeled actions,
+labeled trajectories, adapter inputs, and audit records. If you're trying to
+make sense of how to *use* the library, start with
+[`GETTING_STARTED.md`](GETTING_STARTED.md). This is the doc you keep open when
+you start producing your own labeled data.
+
 The training and calibration commands read JSONL files. Each line is one labeled
 action.
 
