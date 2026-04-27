@@ -3,16 +3,38 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
+
+
+class HarmCategory(str, Enum):
+    """Common harm labels for CUA actions.
+
+    Callers can still pass plain strings. The enum gives examples without making
+    the ontology closed.
+    """
+
+    DESTRUCTIVE_CHANGE = "destructive_change"
+    EXTERNAL_SIDE_EFFECT = "external_side_effect"
+    FINANCIAL_ACTION = "financial_action"
+    CREDENTIAL_EXPOSURE = "credential_exposure"
+    PRIVACY_EXPOSURE = "privacy_exposure"
+    ADMIN_ACTION = "admin_action"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
 class Observation:
-    """A compact textual representation of the current computer state."""
+    """A compact representation of the current computer state."""
 
     text: str
     app: str = ""
+    window: str = ""
     url: str = ""
+    screenshot_path: str = ""
+    screenshot_bytes_b64: str = ""
+    ocr_text: str = ""
+    accessibility_tree: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -21,7 +43,12 @@ class Observation:
         return cls(
             text=str(data.get("text", "")),
             app=str(data.get("app", "")),
+            window=str(data.get("window", "")),
             url=str(data.get("url", "")),
+            screenshot_path=str(data.get("screenshot_path", "")),
+            screenshot_bytes_b64=str(data.get("screenshot_bytes_b64", "")),
+            ocr_text=str(data.get("ocr_text", "")),
+            accessibility_tree=str(data.get("accessibility_tree", "")),
             metadata=dict(data.get("metadata", {})),
         )
 
@@ -29,7 +56,12 @@ class Observation:
         return {
             "text": self.text,
             "app": self.app,
+            "window": self.window,
             "url": self.url,
+            "screenshot_path": self.screenshot_path,
+            "screenshot_bytes_b64": self.screenshot_bytes_b64,
+            "ocr_text": self.ocr_text,
+            "accessibility_tree": self.accessibility_tree,
             "metadata": self.metadata,
         }
 
@@ -43,6 +75,9 @@ class ActionProposal:
     target: str = ""
     text: str = ""
     coordinates: tuple[float, float] | None = None
+    target_metadata: dict[str, Any] = field(default_factory=dict)
+    raw_agent_message: str = ""
+    parsed_command: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -58,6 +93,9 @@ class ActionProposal:
             target=str(action.get("target", "")),
             text=str(action.get("text", "")),
             coordinates=coords,
+            target_metadata=dict(action.get("target_metadata", {})),
+            raw_agent_message=str(action.get("raw_agent_message", "")),
+            parsed_command=dict(action.get("parsed_command", {})),
             metadata=dict(action.get("metadata", {})),
         )
 
@@ -66,6 +104,9 @@ class ActionProposal:
             "type": self.action_type,
             "target": self.target,
             "text": self.text,
+            "target_metadata": self.target_metadata,
+            "raw_agent_message": self.raw_agent_message,
+            "parsed_command": self.parsed_command,
             "metadata": self.metadata,
         }
         if self.coordinates is not None:
@@ -88,7 +129,13 @@ class ActionProposal:
             f"target: {self.target}",
             f"text: {self.text}",
             f"app: {self.observation.app}",
+            f"window: {self.observation.window}",
             f"url: {self.observation.url}",
+            f"ocr_text: {self.observation.ocr_text}",
+            f"accessibility_tree: {self.observation.accessibility_tree}",
+            f"target_metadata: {self.target_metadata}",
+            f"raw_agent_message: {self.raw_agent_message}",
+            f"parsed_command: {self.parsed_command}",
             f"screen_context: {self.observation.text}",
         ]
         return "\n".join(piece for piece in pieces if piece.strip())
@@ -102,14 +149,18 @@ class LabeledAction:
     unsafe: bool
     id: str = ""
     reason: str = ""
+    harm_categories: tuple[str, ...] = ()
+    severity: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LabeledAction":
         return cls(
             proposal=ActionProposal.from_dict(data),
-            unsafe=bool(data.get("unsafe", data.get("label", False))),
+            unsafe=_as_bool(data.get("unsafe", data.get("label", False))),
             id=str(data.get("id", "")),
             reason=str(data.get("reason", "")),
+            harm_categories=tuple(str(item) for item in data.get("harm_categories", [])),
+            severity=str(data.get("severity", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,6 +168,8 @@ class LabeledAction:
         out["unsafe"] = self.unsafe
         out["id"] = self.id
         out["reason"] = self.reason
+        out["harm_categories"] = list(self.harm_categories)
+        out["severity"] = self.severity
         return out
 
 
@@ -128,6 +181,8 @@ class LabeledTrajectory:
     unsafe: bool
     id: str = ""
     reason: str = ""
+    harm_categories: tuple[str, ...] = ()
+    severity: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "LabeledTrajectory":
@@ -136,9 +191,11 @@ class LabeledTrajectory:
             raise ValueError("A labeled trajectory must contain at least one step.")
         return cls(
             steps=steps,
-            unsafe=bool(data.get("unsafe", data.get("label", False))),
+            unsafe=_as_bool(data.get("unsafe", data.get("label", False))),
             id=str(data.get("id", "")),
             reason=str(data.get("reason", "")),
+            harm_categories=tuple(str(item) for item in data.get("harm_categories", [])),
+            severity=str(data.get("severity", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -147,7 +204,17 @@ class LabeledTrajectory:
             "steps": [step.to_dict() for step in self.steps],
             "unsafe": self.unsafe,
             "reason": self.reason,
+            "harm_categories": list(self.harm_categories),
+            "severity": self.severity,
         }
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "unsafe"}
+    return bool(value)
 
 
 @dataclass(frozen=True)
@@ -159,6 +226,7 @@ class GuardDecision:
     threshold: float
     reason: str
     proposal: ActionProposal
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def allowed(self) -> bool:
@@ -171,6 +239,7 @@ class GuardDecision:
             "threshold": self.threshold,
             "reason": self.reason,
             "proposal": self.proposal.to_dict(),
+            "metadata": self.metadata,
         }
 
 

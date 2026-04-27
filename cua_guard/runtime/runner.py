@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Callable
+from uuid import uuid4
 
+from cua_guard.audit import AuditLogger, AuditRecord
 from cua_guard.runtime.agent import ComputerUseAgent
 from cua_guard.runtime.environment import ToyComputerEnvironment
 from cua_guard.runtime.guard import ConformalActionGuard
@@ -46,9 +48,12 @@ def run_episode(
     guard: ConformalActionGuard,
     max_steps: int = 10,
     on_escalate: EscalationCallback | None = None,
+    audit_logger: AuditLogger | None = None,
+    run_id: str | None = None,
 ) -> EpisodeResult:
     result = EpisodeResult()
-    for _ in range(max_steps):
+    trace_id = run_id or str(uuid4())
+    for step_index in range(max_steps):
         observation = env.observe()
         proposal = agent.propose(observation)
         decision = guard.evaluate(proposal)
@@ -74,14 +79,21 @@ def run_episode(
         else:
             result.stopped_by_guard = True
             halt = True
-        result.steps.append(
-            TrajectoryStep(
-                observation=observation,
-                proposal=proposal,
-                decision=decision,
-                executed=executed,
-            )
+        step = TrajectoryStep(
+            observation=observation,
+            proposal=proposal,
+            decision=decision,
+            executed=executed,
         )
+        result.steps.append(step)
+        if audit_logger is not None:
+            audit_logger.log(
+                AuditRecord.from_step(
+                    step=step,
+                    step_index=step_index,
+                    run_id=trace_id,
+                )
+            )
         if proposal.action_type == "done" or halt:
             break
     result.unsafe_event = env.unsafe_event

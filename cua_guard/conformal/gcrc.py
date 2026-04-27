@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from cua_guard.classifiers.base import DangerClassifier
@@ -33,6 +33,7 @@ class CalibrationResult:
     threshold_index: int
     grid: list[float]
     envelope_risks: list[float]
+    score_summary: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +49,7 @@ class CalibrationResult:
             "boundary_warning": self.boundary_warning(),
             "grid": self.grid,
             "envelope_risks": self.envelope_risks,
+            "score_summary": self.score_summary,
         }
 
     @classmethod
@@ -63,6 +65,10 @@ class CalibrationResult:
             threshold_index=int(data["threshold_index"]),
             grid=[float(item) for item in data["grid"]],
             envelope_risks=[float(item) for item in data["envelope_risks"]],
+            score_summary={
+                str(key): float(value)
+                for key, value in data.get("score_summary", {}).items()
+            },
         )
 
     @property
@@ -184,6 +190,7 @@ class GCRCThresholdCalibrator:
             threshold_index=best_index,
             grid=thresholds,
             envelope_risks=envelope_risks,
+            score_summary=_score_summary(clean_scores),
         )
 
     def calibrate_actions(
@@ -218,3 +225,14 @@ def conservative_risk_at_threshold(
         for score, label in zip(scores, unsafe_labels)
     ]
     return (sum(losses) + loss_bound) / (len(losses) + 1)
+
+
+def _score_summary(scores: Sequence[float]) -> dict[str, float]:
+    mean = sum(scores) / len(scores)
+    variance = sum((score - mean) ** 2 for score in scores) / len(scores)
+    return {
+        "min": min(scores),
+        "max": max(scores),
+        "mean": mean,
+        "std": variance**0.5,
+    }

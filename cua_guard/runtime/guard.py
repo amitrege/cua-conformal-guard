@@ -11,6 +11,9 @@ from cua_guard.io import read_json, write_json
 from cua_guard.types import ActionProposal, GuardDecision
 
 
+GUARD_VERSION = "0.2.0"
+
+
 class ConformalActionGuard:
     """Allow, escalate, or block CUA actions using a calibrated danger threshold."""
 
@@ -51,6 +54,7 @@ class ConformalActionGuard:
                 threshold=self.threshold,
                 reason="score below calibrated danger threshold",
                 proposal=proposal,
+                metadata=self.metadata(),
             )
         return GuardDecision(
             decision=self.mode,
@@ -58,7 +62,17 @@ class ConformalActionGuard:
             threshold=self.threshold,
             reason="score exceeded calibrated danger threshold",
             proposal=proposal,
+            metadata=self.metadata(),
         )
+
+    def metadata(self) -> dict:
+        return {
+            "type": "conformal_action_guard",
+            "version": GUARD_VERSION,
+            "mode": self.mode,
+            "alpha": self.alpha,
+            "classifier": self.classifier.metadata(),
+        }
 
     def save_bundle(
         self,
@@ -74,6 +88,8 @@ class ConformalActionGuard:
                 "threshold": self.threshold,
                 "mode": self.mode,
                 "alpha": self.alpha,
+                "guard_version": GUARD_VERSION,
+                "classifier_metadata": self.classifier.metadata(),
                 "calibration": calibration.to_dict(),
             },
         )

@@ -13,6 +13,23 @@ to miss at most `alpha` of unsafe actions on data like our calibration set".
 
 **Danger scorer.** Function from `(observation, action) -> [0, 1]`. Two are
 bundled: a naive-Bayes over text and a keyword baseline. Plug in your own.
+Scorers can expose metadata for audit logs, but the guard only needs `score`.
+
+**Action schema.** `Observation` and `ActionProposal` are the library boundary.
+They can hold text, OCR, accessibility text, screenshot references, app/window
+data, raw agent messages, parsed executor commands, coordinates, and target
+metadata. The schema is broader than the toy demo because real CUAs expose
+different action shapes.
+
+**Adapters.** Small translators from host action formats into `ActionProposal`.
+They don't run browsers or desktops. They sit at the edge:
+
+```text
+host runtime action -> adapter -> ActionProposal -> guard
+```
+
+The current adapters cover native JSON, Playwright-like commands,
+Selenium-like commands, and OSWorld-style desktop dictionaries.
 
 **Threshold `t`.** A single number in `[0, 1]`. Decision rule:
 
@@ -27,6 +44,11 @@ exercise.
 **Labeled examples.** Each is `(observation, action, unsafe_bool)`. You need a
 training set to fit a scorer and a separate calibration set to pick `t`. They
 must not overlap.
+
+**Audit records.** Every runtime or evaluation decision can be written as JSONL:
+action, score, threshold, decision, classifier metadata, guard metadata, and
+labels when labels exist. This is how you find bad labels, bad action parsing,
+and score drift.
 
 ## Calibration
 
@@ -76,6 +98,27 @@ largest grid value, anything the model could realistically output is below it
 calibration was infeasible. The math may say "feasible" in both cases, but
 neither is useful behavior. The CLI prints a warning so an open gate doesn't
 ship by accident.
+
+## Evaluation reports
+
+The evaluator takes a guard and a held-out labeled JSONL file. It does not
+execute actions. It asks: "what would this guard have allowed, blocked, or
+escalated?"
+
+Reported metrics:
+
+- missed unsafe rate
+- false positive rate
+- intervention rate
+- block rate
+- escalation rate
+- risk by harm category
+- boundary warnings from calibration
+- simple score-shift warnings between calibration and evaluation
+
+The score-shift checks are intentionally simple. They compare evaluation scores
+to the calibration score range and mean/std. They are not a proof of no
+distribution shift. They are cheap warning lights.
 
 ## Trajectory-level calibration
 

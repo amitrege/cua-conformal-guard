@@ -50,6 +50,7 @@ class KeywordDangerScorer(DangerClassifier):
             path,
             {
                 "type": "keyword",
+                "metadata": self.metadata(),
                 "patterns": [
                     {"pattern": item.pattern, "weight": item.weight}
                     for item in self.patterns
@@ -65,3 +66,10 @@ class KeywordDangerScorer(DangerClassifier):
             for item in data.get("patterns", [])
         ]
         return cls(patterns=patterns)
+
+    def metadata(self) -> dict:
+        return {
+            "type": "keyword",
+            "score_range": [0.0, 1.0],
+            "pattern_count": len(self.patterns),
+        }

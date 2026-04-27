@@ -18,6 +18,8 @@ class CLITest(unittest.TestCase):
             model_path = tmp / "model.json"
             guard_path = tmp / "guard.json"
             trajectory_guard_path = tmp / "trajectory_guard.json"
+            report_path = tmp / "report.json"
+            audit_path = tmp / "audit.jsonl"
 
             with contextlib.redirect_stdout(io.StringIO()):
                 train_code = main(
@@ -76,9 +78,31 @@ class CLITest(unittest.TestCase):
 
             demo_stdout = io.StringIO()
             with contextlib.redirect_stdout(demo_stdout):
-                demo_code = main(["run-demo", "--guard", str(guard_path)])
+                demo_code = main(
+                    ["run-demo", "--guard", str(guard_path), "--audit-log", str(audit_path)]
+                )
             self.assertEqual(demo_code, 0)
             self.assertIn('"unsafe_event": false', demo_stdout.getvalue())
+            self.assertTrue(audit_path.exists())
+
+            evaluate_stdout = io.StringIO()
+            with contextlib.redirect_stdout(evaluate_stdout):
+                evaluate_code = main(
+                    [
+                        "evaluate",
+                        "--guard",
+                        str(guard_path),
+                        "--data",
+                        str(ROOT / "examples" / "test_actions.jsonl"),
+                        "--output",
+                        str(report_path),
+                    ]
+                )
+            self.assertEqual(evaluate_code, 0)
+            report = read_json(report_path)
+            self.assertIn("missed_unsafe_rate", report)
+            self.assertIn("risk_by_harm_category", report)
+            self.assertIn('"block_rate"', evaluate_stdout.getvalue())
 
 
 if __name__ == "__main__":

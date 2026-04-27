@@ -28,13 +28,19 @@ class NaiveBayesDangerClassifier(DangerClassifier):
     swap in a stronger classifier while keeping the same `score` interface.
     """
 
-    def __init__(self, alpha: float = 1.0, min_token_count: int = 1) -> None:
+    def __init__(
+        self,
+        alpha: float = 1.0,
+        min_token_count: int = 1,
+        model_metadata: dict[str, Any] | None = None,
+    ) -> None:
         self.alpha = float(alpha)
         self.min_token_count = int(min_token_count)
         self.class_doc_counts = {False: 0, True: 0}
         self.token_counts = {False: Counter(), True: Counter()}
         self.total_tokens = {False: 0, True: 0}
         self.vocabulary: set[str] = set()
+        self.model_metadata = dict(model_metadata or {})
         self._fitted = False
 
     def fit(self, records: list[LabeledAction]) -> "NaiveBayesDangerClassifier":
@@ -65,6 +71,15 @@ class NaiveBayesDangerClassifier(DangerClassifier):
             self.total_tokens[unsafe] += len(filtered)
 
         self._fitted = True
+        self.model_metadata.update(
+            {
+                "type": "naive_bayes",
+                "training_records": len(records),
+                "unsafe_records": self.class_doc_counts[True],
+                "safe_records": self.class_doc_counts[False],
+                "score_range": [0.0, 1.0],
+            }
+        )
         return self
 
     def score(self, proposal: ActionProposal) -> float:
@@ -102,6 +117,7 @@ class NaiveBayesDangerClassifier(DangerClassifier):
             "type": "naive_bayes",
             "alpha": self.alpha,
             "min_token_count": self.min_token_count,
+            "metadata": self.metadata(),
             "class_doc_counts": {
                 "safe": self.class_doc_counts[False],
                 "unsafe": self.class_doc_counts[True],
@@ -122,6 +138,7 @@ class NaiveBayesDangerClassifier(DangerClassifier):
         model = cls(
             alpha=float(data.get("alpha", 1.0)),
             min_token_count=int(data.get("min_token_count", 1)),
+            model_metadata=dict(data.get("metadata", {})),
         )
         doc_counts = data["class_doc_counts"]
         token_counts = data["token_counts"]
@@ -141,6 +158,17 @@ class NaiveBayesDangerClassifier(DangerClassifier):
         model.vocabulary = set(data["vocabulary"])
         model._fitted = True
         return model
+
+    def metadata(self) -> dict[str, Any]:
+        metadata = {
+            "type": "naive_bayes",
+            "score_range": [0.0, 1.0],
+            "alpha": self.alpha,
+            "min_token_count": self.min_token_count,
+            "vocabulary_size": len(self.vocabulary),
+        }
+        metadata.update(self.model_metadata)
+        return metadata
 
 
 def _logistic(value: float) -> float:

@@ -11,10 +11,12 @@ from cua_guard.classifiers.loader import load_classifier
 from cua_guard.classifiers.naive_bayes import NaiveBayesDangerClassifier
 from cua_guard.conformal.gcrc import CalibrationResult, GCRCThresholdCalibrator
 from cua_guard.conformal.trajectory import calibrate_trajectories
-from cua_guard.io import load_labeled_actions, load_labeled_trajectories, read_json
+from cua_guard.evaluation import evaluate_labeled_actions, load_calibration_from_guard_bundle
+from cua_guard.io import load_labeled_actions, load_labeled_trajectories, read_json, write_json
 from cua_guard.runtime.agent import ScriptedAgent
 from cua_guard.runtime.environment import ToyComputerEnvironment
 from cua_guard.runtime.guard import ConformalActionGuard
+from cua_guard.audit import JsonlAuditLogger
 from cua_guard.runtime.runner import EscalationResolution, run_episode
 
 
@@ -66,6 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Demo-only callback that approves escalated actions.",
     )
+    demo.add_argument("--audit-log", help="Optional JSONL audit trace path.")
+
+    evaluate = subparsers.add_parser("evaluate", help="Evaluate a guard on labeled actions.")
+    evaluate.add_argument("--guard", required=True, help="Guard bundle JSON path.")
+    evaluate.add_argument("--data", required=True, help="Labeled action JSONL file.")
+    evaluate.add_argument("--output", help="Optional JSON report path.")
+    evaluate.add_argument("--audit-log", help="Optional scored JSONL audit trace path.")
 
     inspect = subparsers.add_parser("inspect-guard", help="Print guard bundle JSON.")
     inspect.add_argument("--guard", required=True)
@@ -144,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
             ]
         )
         env = ToyComputerEnvironment()
+        audit_logger = JsonlAuditLogger(args.audit_log) if args.audit_log else None
         on_escalate = None
         if args.approve_escalations:
             on_escalate = lambda _decision: EscalationResolution(
@@ -156,8 +166,26 @@ def main(argv: list[str] | None = None) -> int:
             guard,
             max_steps=args.max_steps,
             on_escalate=on_escalate,
+            audit_logger=audit_logger,
+            run_id="demo",
         )
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "evaluate":
+        guard = ConformalActionGuard.load_bundle(args.guard)
+        records = load_labeled_actions(args.data)
+        calibration = load_calibration_from_guard_bundle(args.guard)
+        report = evaluate_labeled_actions(
+            guard=guard,
+            records=records,
+            calibration=calibration,
+            audit_log_path=args.audit_log,
+        )
+        report_dict = report.to_dict()
+        if args.output:
+            write_json(args.output, report_dict)
+        print(json.dumps(report_dict, indent=2, sort_keys=True))
         return 0
 
     if args.command == "inspect-guard":

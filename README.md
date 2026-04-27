@@ -20,7 +20,7 @@ This is the third option but the threshold is calibrated. You provide labeled
 actions, choose `alpha`, and the gate is set so it lets through at most about
 `alpha` of the unsafe ones on data drawn the same way as your labels.
 
-## Three commands
+## Quickstart
 
 ```bash
 # Confirm the install works.
@@ -39,8 +39,16 @@ python3 -m cua_guard.cli calibrate \
   --alpha 0.10 \
   --mode block
 
-# Run the toy episode against the gate.
-python3 -m cua_guard.cli run-demo --guard ./runs/guard.json
+# Run the toy episode against the gate and write an audit trace.
+python3 -m cua_guard.cli run-demo \
+  --guard ./runs/guard.json \
+  --audit-log ./runs/demo_trace.jsonl
+
+# Evaluate on held-out labeled actions.
+python3 -m cua_guard.cli evaluate \
+  --guard ./runs/guard.json \
+  --data examples/test_actions.jsonl \
+  --output ./runs/eval.json
 ```
 
 The toy agent tries "Search docs" (allowed) then "Delete project" (blocked,
@@ -108,6 +116,63 @@ while not done:
 `Observation` and `ActionProposal` are dataclasses in `cua_guard.types`. JSON
 schema in `docs/DATA_FORMAT.md`.
 
+## Adapters
+
+The core library does not own the browser, desktop, or phone. It just needs the
+action right before execution. Adapters translate host actions into
+`ActionProposal`:
+
+```python
+from cua_guard.adapters import PlaywrightActionAdapter
+
+adapter = PlaywrightActionAdapter()
+proposal = adapter.to_proposal(
+    observation={"app": "browser", "url": page.url, "text": visible_text},
+    action={"method": "click", "selector": "button.delete", "text": "Delete project"},
+)
+decision = guard.evaluate(proposal)
+```
+
+Bundled adapters are dependency-free:
+
+- `JsonActionAdapter` for this repo's native JSON schema.
+- `PlaywrightActionAdapter` for Playwright-like command dictionaries.
+- `SeleniumActionAdapter` for Selenium-like command dictionaries.
+- `OSWorldActionAdapter` for desktop action dictionaries.
+
+They do not execute anything. They only translate action shape.
+
+## Audit traces
+
+Safety work needs logs. `run_episode` and `evaluate` can write JSONL traces with
+the observation, proposed action, score, threshold, decision, classifier
+metadata, guard metadata, and labels when labels are available.
+
+```bash
+python3 -m cua_guard.cli run-demo \
+  --guard ./runs/guard.json \
+  --audit-log ./runs/demo_trace.jsonl
+```
+
+Each line is one guard decision. Use it to debug false positives, false
+negatives, threshold drift, and weird action parsing.
+
+## Evaluation
+
+`evaluate` scores a held-out labeled JSONL file and reports:
+
+- missed unsafe rate
+- false positive rate
+- intervention rate
+- block rate
+- escalation rate
+- risk by harm category
+- threshold boundary warnings
+- simple calibration/test score-shift warnings
+
+This is the command that turns the repo from a demo into something you can use
+for experiments.
+
 ## How the threshold gets picked
 
 The calibrator walks candidate thresholds from strict to loose. At each
@@ -143,10 +208,13 @@ drawn the same way as your calibration set, averaged over fresh samples.
 
 ```text
 cua_guard/
+  adapters/         small translators for host CUA action formats
+  audit.py          JSONL traces for guard decisions
   classifiers/      naive-Bayes scorer and a keyword baseline
   conformal/        threshold calibrator
   runtime/          guard, agent wrapper, toy environment, episode runner
-  cli.py            train, calibrate, inspect, run-demo
+  evaluation.py     held-out metrics
+  cli.py            train, calibrate, inspect, run-demo, evaluate
 examples/           labeled actions and trajectories used by the quickstart
 tests/              unit tests; `python3 -m unittest discover`
 docs/               design notes and data format reference
@@ -158,6 +226,10 @@ The bundled scorer is a naive-Bayes over text tokens — no torch, no GPU. To
 use a real model, subclass `DangerClassifier` and implement `fit`, `score`,
 `save`, `load`. The guard only ever calls `score(proposal) -> float in [0, 1]`,
 larger means more dangerous.
+
+Classifiers can also expose `metadata()` and `score_batch()`. The default
+implementations work, but serious scorers should return model name, data
+version, label ontology, score range, and whatever else you need in audit logs.
 
 ## Labels
 

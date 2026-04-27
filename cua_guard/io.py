@@ -24,7 +24,9 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 def write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> None:
-    with Path(path).open("w", encoding="utf-8") as handle:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, sort_keys=True))
             handle.write("\n")
