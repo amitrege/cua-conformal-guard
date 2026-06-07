@@ -1,195 +1,166 @@
 # Getting Started
 
-A hands-on walkthrough. By the end you'll have a calibrated guard, an audit
-log, an evaluation report, and a working pattern for plugging the gate into
-your own agent.
+By the end of this walkthrough you will have a calibrated guard, an
+audit log, an evaluation report, and the gate wired into your own agent
+loop. If you have not seen conformal calibration before, read
+[`CONCEPTS.md`](CONCEPTS.md) first; the only piece you really need from
+it is that `alpha` is a target miss rate.
 
-This doc assumes you've skimmed [`CONCEPTS.md`](CONCEPTS.md) — at minimum, you
-know that `alpha` is a target miss rate and that the calibrator picks a
-threshold from labeled examples.
-
-Time budget: ~10 minutes of typing, plus however long you want to poke at the
-artifacts.
-
----
-
-## 0. Setup
+## Setup
 
 ```bash
 git clone <this repo>
 cd cua_conformal_guard
-python3 -m unittest discover    # ~1s, confirms install
-mkdir -p runs                   # all artifacts will land here
+python3 -m unittest discover     # sanity check
+mkdir -p runs                    # outputs go here
 ```
 
-No dependencies to install. The library is pure standard library.
+Nothing to install beyond Python 3.10+.
 
----
+## 1. Train the scorer
 
-## 1. Train the danger scorer
-
-The scorer's job is `(observation, action) → [0, 1]` where larger means more
-dangerous. The bundled one is naive Bayes over the rendered action+context
-text — small, transparent, no GPU. You'll likely want to swap it out later
-(see [§7 Swapping the scorer](#7-swapping-the-scorer)).
+The scorer maps `(observation, action)` to a number in `[0, 1]`, where
+larger means more dangerous. The bundled implementation is a multinomial
+naive Bayes over the rendered text; it is small enough to read end to
+end and sufficient for this walkthrough. For production use, see
+[Swap the scorer](#swap-the-scorer).
 
 ```bash
 python3 -m cua_guard.cli train-classifier \
-  --data examples/train_actions.jsonl \
-  --model ./runs/danger.json
+    --data examples/train_actions.jsonl \
+    --model runs/danger.json
 ```
 
-What just happened: `examples/train_actions.jsonl` has 16 labeled actions.
-Each line is one `(observation, action, unsafe)` example. The CLI fits a
-multinomial naive Bayes over tokenized action+context text and writes the
-fitted model to `./runs/danger.json` as JSON (no pickles).
+`examples/train_actions.jsonl` contains 16 labeled actions. The fitted
+model is written to `runs/danger.json` as plain JSON.
 
-Peek at the artifact if you're curious:
+## 2. Calibrate a threshold
 
-```bash
-python3 -c "import json; d=json.load(open('runs/danger.json')); print('vocab size:', len(d['vocabulary']))"
-```
-
----
-
-## 2. Calibrate the threshold
-
-Now we hand the scorer a held-out labeled set and a target risk, and the
-calibrator picks a threshold.
+Pass the scorer a held-out labeled set and a target miss rate:
 
 ```bash
 python3 -m cua_guard.cli calibrate \
-  --data examples/calibration_actions.jsonl \
-  --model ./runs/danger.json \
-  --guard ./runs/guard.json \
-  --alpha 0.10 \
-  --mode block
+    --data examples/calibration_actions.jsonl \
+    --model runs/danger.json \
+    --guard runs/guard.json \
+    --alpha 0.10 --mode block
 ```
 
-Expected output (numbers will vary slightly):
+You should see something like:
 
 ```text
-calibrated threshold=0.9439 alpha=0.1000 conservative_risk=0.0556 feasible=True -> ./runs/guard.json
+calibrated threshold=0.9439 alpha=0.1000 conservative_risk=0.0556 feasible=True -> runs/guard.json
 ```
 
-Read each field:
+- `threshold` is the value scores are compared against.
+- `alpha` is the target miss rate you requested.
+- `conservative_risk` is the `(L + 1) / (n + 1)` value the calibrator
+  compared to `alpha`.
+- `feasible=True` means at least one threshold satisfies the bound. If
+  it is `False`, `alpha` is tighter than the calibration set can
+  support.
 
-- `threshold` — the `t` to compare scores against.
-- `alpha` — what you asked for.
-- `conservative_risk` — the `(L+1)/(n+1)` value at the chosen threshold. This
-  is what the calibrator actually compared to `alpha`.
-- `feasible=True` — there exists a threshold whose conservative risk fits
-  inside `alpha`. If you ever see `feasible=False`, your `alpha` is tighter
-  than your calibration set can support — get more data or relax `alpha`.
-
-The bundled artifact `./runs/guard.json` contains the threshold, the mode, a
-pointer to the classifier, and the full calibration result for audit.
+`runs/guard.json` is the saved bundle: the threshold, the mode, a pointer
+to the classifier, and the full calibration record.
 
 ```bash
-python3 -m cua_guard.cli inspect-guard --guard ./runs/guard.json | head -30
+python3 -m cua_guard.cli inspect-guard --guard runs/guard.json | head -30
 ```
 
-### Try a tighter and a looser alpha
+### Try a few values of alpha
 
-The threshold isn't a free parameter — it's a function of `alpha` and your
-data. To feel this, run the same command with `--alpha 0.50` and `--alpha
-0.05` and watch the threshold move. Tighter `alpha` ⇒ stricter gate ⇒ smaller
-threshold.
+The threshold depends on both `alpha` and the data. Re-run the command
+with `--alpha 0.50` and then `--alpha 0.05` to see how the threshold
+moves. A tighter `alpha` produces a stricter gate.
 
-If the CLI prints a `warning: calibrated threshold is at or near the
-maximum/minimum grid value`, take it seriously. It means the math says
-"feasible" but the gate is effectively open or closed. See
-[`CONCEPTS.md` §5](CONCEPTS.md#5-what-the-guarantee-covers).
-
----
+A warning of the form `calibrated threshold is at or near the
+maximum/minimum grid value` should not be ignored. The math reports a
+feasible threshold, but the gate is effectively open or closed. See
+[`CONCEPTS.md`](CONCEPTS.md#warnings-the-cli-prints).
 
 ## 3. Run the toy episode
 
-A scripted agent proposes "click Search docs", then "click Delete project",
-then "done". The first should be allowed; the second should be blocked.
+A scripted agent proposes "click Search docs", then "click Delete
+project", then "done". The first action should be allowed and the second
+should be blocked.
 
 ```bash
 python3 -m cua_guard.cli run-demo \
-  --guard ./runs/guard.json \
-  --audit-log ./runs/demo_trace.jsonl
+    --guard runs/guard.json \
+    --audit-log runs/demo_trace.jsonl
 ```
 
-You'll see a JSON dump of the episode result. Two things to verify:
+The episode result prints as JSON. Two fields to check:
 
 - `stopped_by_guard: true` — the gate intervened.
-- `unsafe_event: false` — the toy environment did *not* run the destructive
-  action.
+- `unsafe_event: false` — the destructive action never ran.
 
 The audit log has one line per guard decision:
 
 ```bash
-wc -l ./runs/demo_trace.jsonl
-python3 -m json.tool < <(head -1 ./runs/demo_trace.jsonl)
+wc -l runs/demo_trace.jsonl
+python3 -m json.tool < <(head -1 runs/demo_trace.jsonl)
 ```
 
-Each record carries the observation, action, score, threshold, decision,
-classifier metadata, guard metadata, and (for evaluation traces) labels. This
-is what you'll grep through when something looks wrong in production.
-
----
+Each record contains the observation, the action, the score, the
+threshold, the decision, classifier metadata, guard metadata, and (for
+evaluation traces) the labels.
 
 ## 4. Evaluate on held-out data
 
-`run-demo` proves the wiring works. To get *numbers* you can put in a report,
-use `evaluate`:
+`run-demo` confirms that the wiring works. For metrics you can include
+in a report, use `evaluate`:
 
 ```bash
 python3 -m cua_guard.cli evaluate \
-  --guard ./runs/guard.json \
-  --data examples/test_actions.jsonl \
-  --output ./runs/eval.json \
-  --audit-log ./runs/eval_trace.jsonl
+    --guard runs/guard.json \
+    --data examples/test_actions.jsonl \
+    --output runs/eval.json \
+    --audit-log runs/eval_trace.jsonl
 ```
 
-The report includes:
+The report has:
 
-- `missed_unsafe_rate` — the thing `alpha` is bounding. Should be ≤ `alpha` in
-  expectation, modulo small-sample noise.
+- `missed_unsafe_rate` — the quantity `alpha` bounds. In expectation it
+  should sit at or below `alpha`, though small samples can swing it.
 - `false_positive_rate` — fraction of safe actions the gate intervened on.
-- `intervention_rate` / `block_rate` / `escalation_rate` — what fraction of
-  the test set the gate touched and how.
-- `risk_by_harm_category` — per-category miss rate, computed from the
-  `harm_categories` field on each labeled action.
+- `intervention_rate`, `block_rate`, `escalation_rate` — how often the
+  gate fired, and how.
+- `risk_by_harm_category` — per-category miss rate, from each record's
+  `harm_categories`.
 - `boundary_warning` — propagated from calibration if relevant.
 - `distribution_warnings` — fires when test scores fall outside the
-  calibration score range or the means drift apart.
+  calibration range or the means drift apart.
 
-A toy 5-row test set is too small to read the rates literally. The point of
-the example is the *shape* of the report and the per-record audit trace.
-
----
+Five test rows is too small a sample to read these rates literally; the
+goal of this step is to see the shape of the report and the per-record
+audit trace.
 
 ## 5. Wire the gate into your own agent
 
-This is the integration that matters. The library doesn't care how your agent
-decides what to do — it only needs the proposal right before execution.
+The library is agnostic to how your agent chooses actions; it only
+needs the proposal before that action runs.
 
 ```python
 from cua_guard.runtime.guard import ConformalActionGuard
 
-guard = ConformalActionGuard.load_bundle("./runs/guard.json")
+guard = ConformalActionGuard.load_bundle("runs/guard.json")
 
 while not done:
-    observation = your_env.observe()
-    proposal = your_agent.propose(observation)   # ActionProposal
+    observation = env.observe()
+    proposal = agent.propose(observation)        # ActionProposal
     decision = guard.evaluate(proposal)
     if decision.allowed:
-        your_env.step(proposal)
+        env.step(proposal)
     else:
-        # decision.decision is "block" or "escalate"
-        handle_intervention(decision)
+        handle_intervention(decision)            # block or escalate
 ```
 
-`Observation` and `ActionProposal` are dataclasses in `cua_guard.types`. If
-your CUA already produces actions in a Playwright/Selenium/OSWorld-shaped
-dictionary, use an adapter — see [§6](#6-adapters).
+`Observation` and `ActionProposal` are defined in `cua_guard.types`. If
+your CUA already emits Playwright, Selenium, or OSWorld-shaped
+dictionaries, use an [adapter](#adapters) to convert them.
 
-A complete runnable script is in
+A full runnable script is in
 [`examples/integrate_with_agent.py`](../examples/integrate_with_agent.py).
 
 ### Escalate instead of block
@@ -208,21 +179,19 @@ def review(decision):
 result = run_episode(agent, env, guard, on_escalate=review)
 ```
 
-The callback is where a human review step, a Slack message, or a
-stricter-but-slower second model would go. Returning `True` / `False` works
-too — the runner wraps it.
+The callback is the natural insertion point for a human review step, a
+Slack message, or a slower and stricter model. Returning a plain `bool`
+is also supported; the runner wraps it.
 
-A worked example is in
-[`examples/escalation_callback.py`](../examples/escalation_callback.py).
+See [`examples/escalation_callback.py`](../examples/escalation_callback.py)
+for a worked version.
 
----
+## Adapters
 
-## 6. Adapters
+Adapters convert host action dictionaries into `ActionProposal`. Four
+are bundled:
 
-The library doesn't know about browsers or desktops. Adapters translate
-host-shaped action dicts into `ActionProposal`. Bundled and dependency-free:
-
-- `JsonActionAdapter` — this repo's native schema.
+- `JsonActionAdapter` — the native schema.
 - `PlaywrightActionAdapter` — Playwright-like commands.
 - `SeleniumActionAdapter` — Selenium-like commands.
 - `OSWorldActionAdapter` — OSWorld desktop dictionaries.
@@ -238,88 +207,72 @@ proposal = adapter.to_proposal(
 decision = guard.evaluate(proposal)
 ```
 
-Adapters never execute anything. They just shape data so the gate can score
-it. If your CUA stack has a custom format, write a tiny subclass of
-`ActionAdapter` — there's a 30-line example in
-`cua_guard/adapters/json_adapter.py`.
+Adapters do not execute actions; they reshape them so the gate can
+score them. For a custom format, subclass `ActionAdapter`. The JSON
+adapter at `cua_guard/adapters/json_adapter.py` is about thirty lines
+and serves as a template.
 
----
+## Swap the scorer
 
-## 7. Swapping the scorer
+The naive-Bayes scorer is enough for this walkthrough. For production
+use, you will want something stronger: a fine-tuned classifier, an LLM
+judge, or a multimodal model that reads screenshots.
 
-The bundled naive-Bayes scorer is good enough for tests, examples, and
-bootstrapping. Real deployments should swap in something stronger (a finetuned
-text classifier, an LLM-as-judge, a multimodal model that sees screenshots).
-
-The contract is `DangerClassifier` in `cua_guard/classifiers/base.py`:
+The interface to satisfy is `DangerClassifier` in
+`cua_guard/classifiers/base.py`:
 
 ```python
 class DangerClassifier(ABC):
     def fit(self, records): ...
-    def score(self, proposal) -> float: ...   # in [0, 1], larger = more dangerous
+    def score(self, proposal) -> float: ...      # in [0, 1]
     def save(self, path): ...
     @classmethod
     def load(cls, path): ...
 ```
 
-The guard only ever calls `score(proposal)`. Everything else is for training
-and persistence. Override `score_batch` when you have a backend that
-vectorizes. Override `metadata()` to return model name, data version, and
-score range — it ends up in audit logs.
+The guard only ever calls `score(proposal)`. Override `score_batch` if
+you have a backend that vectorizes. Override `metadata()` to surface the
+model name and data version — both end up in the audit log.
 
-Whatever scorer you ship, **recalibrate** when it changes. The threshold is a
-number on that scorer's output; a new scorer needs a new threshold.
+A new scorer produces a new score distribution, so the calibrated
+threshold is no longer valid; recalibrate before deploying.
 
----
+## Trajectory-level calibration
 
-## 8. Trajectory-level calibration
-
-Same flow, but each example is a sequence of steps with one label.
+If your labels are at the episode level rather than per action, use:
 
 ```bash
 python3 -m cua_guard.cli calibrate-trajectories \
-  --data examples/calibration_trajectories.jsonl \
-  --model ./runs/danger.json \
-  --guard ./runs/guard_traj.json \
-  --alpha 0.25 --mode block
+    --data examples/calibration_trajectories.jsonl \
+    --model runs/danger.json \
+    --guard runs/guard_traj.json \
+    --alpha 0.25 --mode block
 ```
 
-The trajectory score is the max action score over the sequence. The runtime
-gate still operates step by step, so the threshold drops in unchanged — it
-just got calibrated against episode-level labels.
+The trajectory score is the max of its step scores. The runtime gate
+still runs step by step, so the resulting threshold works in the same
+gate, but it was tuned against episode labels rather than action labels.
 
-Use this when you can label outcomes ("did this episode delete a project?")
-but not individual clicks.
+Use trajectory calibration when you can label outcomes ("did this
+episode delete a project?") but not individual clicks.
 
----
+## When to recalibrate
 
-## 9. Recalibrating
+- the scorer changed (retrain or swap)
+- the action or observation schema changed
+- the deployment surface changed (new app, prompt template, locale)
+- `alpha` changed
 
-Recalibrate when any of these change:
+The score-shift warning from `evaluate` compares evaluation scores
+against the calibration summary; the check is approximate but catches
+the obvious cases.
 
-- The scorer (any retrain or model swap).
-- The action/observation schema (new fields the scorer can read).
-- The deployment surface (new app, new prompt style, new locale).
-- Your `alpha` target.
+## Next
 
-The threshold is a function of *the scorer's output distribution* on *your
-calibration data*. If either side shifts, the old threshold isn't doing the
-work you think it is.
-
-The score-shift warning in `evaluate` is a cheap smoke alarm. It compares
-test scores to the calibration score range and means. It's not a proof of no
-distribution shift, but it'll catch the obvious cases.
-
----
-
-## 10. Where to go from here
-
-- Read [`DESIGN.md`](DESIGN.md) for the math behind the calibrator and the
-  reasoning behind each warning.
-- Read [`DATA_FORMAT.md`](DATA_FORMAT.md) when you start producing your own
-  labeled data.
-- Skim [`examples/integrate_with_agent.py`](../examples/integrate_with_agent.py)
+- [`DESIGN.md`](DESIGN.md) for the calibrator math and the rationale
+  behind each warning.
+- [`DATA_FORMAT.md`](DATA_FORMAT.md) for the JSON schemas.
+- [`examples/integrate_with_agent.py`](../examples/integrate_with_agent.py)
   and [`examples/escalation_callback.py`](../examples/escalation_callback.py)
-  to see the call patterns end to end.
-- Run `python3 -m unittest discover` after any code change. The tests are
-  fast and cover most of the library surface.
+  for the end-to-end call patterns.
+- `python3 -m unittest discover` after any change.

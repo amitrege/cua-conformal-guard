@@ -1,15 +1,15 @@
 # Data Format
 
-Schema reference for everything the library reads or writes: labeled actions,
-labeled trajectories, adapter inputs, and audit records. If you're trying to
-make sense of how to *use* the library, start with
-[`GETTING_STARTED.md`](GETTING_STARTED.md). This is the doc you keep open when
-you start producing your own labeled data.
+Schema reference for everything the library reads or writes: labeled
+actions, labeled trajectories, adapter input, and audit records. Use it
+as a reference when producing your own labeled data.
 
-The training and calibration commands read JSONL files. Each line is one labeled
-action.
+For a hands-on walkthrough, see
+[`GETTING_STARTED.md`](GETTING_STARTED.md).
 
-## Labeled Action
+## Labeled action
+
+Training and calibration files are JSONL — one labeled action per line.
 
 ```json
 {
@@ -39,50 +39,57 @@ action.
 }
 ```
 
-Fields:
+### Fields
 
-- `id`: Optional stable identifier.
-- `observation`: What the agent saw. `text` can be OCR, accessibility text, DOM
-  text, or a human summary. `screenshot_path` and `screenshot_bytes_b64` are
-  optional; the built-in text scorers do not read images, but stronger scorers
-  can.
-- `action`: The proposed GUI action. `type`, `target`, `text`, coordinates,
-  target metadata, raw agent message, and parsed command are rendered or
-  preserved for classifiers and audit logs.
-- `unsafe`: Boolean label for the calibrated loss.
-- `reason`: Optional annotation for audit/debugging.
-- `harm_categories`: Optional list used by the evaluator for per-category risk.
-- `severity`: Optional label such as `low`, `medium`, `high`, or `critical`.
+- `id` — optional stable identifier.
+- `observation` — what the agent saw. `text` can be OCR, accessibility
+  text, DOM text, or a human summary. `screenshot_path` and
+  `screenshot_bytes_b64` are both optional; the bundled text scorers
+  ignore them, but a stronger scorer can use them.
+- `action` — the proposed action. `type`, `target`, `text`, coordinates,
+  target metadata, the raw agent message, and the parsed command are all
+  preserved, both for the classifier and for the audit log.
+- `unsafe` — the boolean safety label that the calibration loss reads.
+- `reason` — optional free-text annotation, useful when reviewing audit
+  logs.
+- `harm_categories` — optional list; the evaluator reports per-category
+  risk from it.
+- `severity` — optional, e.g. `low`, `medium`, `high`, `critical`.
 
-## Labeling guidance
+### Labeling guidance
 
-Categories worth covering early:
+Label the action together with the surrounding context, never the
+action string alone. Clicking "Delete" on a throwaway draft is harmless;
+the same click on a real settings page is catastrophic. The scorer reads
+both the action and the surrounding screen text, so the label must
+reflect both.
 
-- destructive data change: delete, reset, overwrite, revoke, uninstall
-- external side effect: send, submit, publish, post, invite
-- financial side effect: pay, buy, transfer, withdraw
-- credential or privacy exposure: reveal password, copy API key, upload a private file
-- irreversible admin action: change owner, remove access, disable a security control
+Common harm categories to cover:
 
-Label the action in context, not the action string alone. `click "Delete"` on a
-throwaway draft is fine. The same click on a real project settings page is not.
-The classifier sees both the action and the surrounding screen text, so the
-label needs to reflect both.
+- destructive data change — delete, reset, overwrite, revoke, uninstall
+- external side effect — send, submit, publish, post, invite
+- financial side effect — pay, buy, transfer, withdraw
+- credential or privacy exposure — reveal password, copy API key, upload
+  a private file
+- irreversible admin action — change owner, remove access, disable a
+  security control
 
 Suggested `harm_categories` values:
 
-- `destructive_change`
-- `external_side_effect`
-- `financial_action`
-- `credential_exposure`
-- `privacy_exposure`
-- `admin_action`
-- `unknown`
+```text
+destructive_change
+external_side_effect
+financial_action
+credential_exposure
+privacy_exposure
+admin_action
+unknown
+```
 
-## Labeled Trajectory
+## Labeled trajectory
 
-Trajectory-level calibration uses the same action schema, but wraps several
-steps under `steps` and gives one label to the whole trajectory:
+Trajectory calibration uses the same action schema, but wraps several
+steps under `steps` and applies one label to the whole sequence:
 
 ```json
 {
@@ -105,17 +112,17 @@ steps under `steps` and gives one label to the whole trajectory:
 The trajectory score is the maximum step score:
 
 ```text
-max(classifier_score(step) for step in trajectory)
+trajectory_score(steps) = max(classifier_score(step) for step in steps)
 ```
 
-The action-level guard at runtime uses the same threshold and stops as soon as
-any single proposed step crosses it. A trajectory-calibrated threshold drops in
-for action-level gating without any change.
+At runtime the gate still scores step by step and stops the first time
+a step crosses the threshold; a trajectory-calibrated threshold drops
+into the same gate unchanged.
 
 ## Adapter input
 
-Adapters accept loose host dictionaries and preserve the original command under
-`parsed_command`.
+Adapters accept loose host dictionaries and keep the original command
+under `parsed_command`. The full list is in `cua_guard/adapters/`.
 
 Playwright-like:
 
@@ -150,23 +157,31 @@ OSWorld-style:
 
 ## Audit JSONL
 
-Audit logs are one JSON object per guard decision:
+Each guard decision becomes one JSON object on its own line:
 
 ```json
 {
   "timestamp": "2026-04-27T00:00:00+00:00",
   "run_id": "demo",
   "step_index": 1,
+  "observation": {
+    "app": "browser",
+    "text": "Project settings page",
+    "url": "https://example.test/settings"
+  },
+  "proposed_action": {"type": "click", "target": "Delete project"},
   "score": 0.94,
   "threshold": 0.62,
   "decision": "block",
+  "reason": "score exceeded calibrated danger threshold",
   "executed": false,
-  "proposed_action": {"type": "click", "target": "Delete project"},
   "classifier": {"type": "naive_bayes", "score_range": [0.0, 1.0]},
   "guard": {"type": "conformal_action_guard", "mode": "block"},
   "labels": {"unsafe": true, "harm_categories": ["destructive_change"]}
 }
 ```
 
-Runtime traces may have empty `labels`. Evaluation traces include labels from
-the evaluation file.
+`observation` contains the full screen state in the same schema as the
+labeled-action format. `reason` is the guard's explanation for the
+decision. Runtime traces have an empty `labels` object; evaluation
+traces populate it from the evaluation file.

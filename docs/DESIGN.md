@@ -1,60 +1,52 @@
-# Design Notes
+# Design
 
-For someone who's read [`CONCEPTS.md`](CONCEPTS.md), has the
-[quickstart](GETTING_STARTED.md) running, and wants to know what the
-calibrator is doing under the hood — the math, the search procedure, and the
-edge cases that drive the warnings.
-
-If you're new to the library, read [`CONCEPTS.md`](CONCEPTS.md) first. This
-doc assumes you already know what `alpha` is and why the threshold is
-calibrated.
-
-## What the library does
-
-A runtime gate for a CUA that scores every proposed action, blocks or escalates
-dangerous ones, and has a knob whose meaning isn't gut feel — it's "we expect
-to miss at most `alpha` of unsafe actions on data like our calibration set".
+Notes for readers who have already skimmed
+[`CONCEPTS.md`](CONCEPTS.md), have the
+[walkthrough](GETTING_STARTED.md) working, and want to understand the
+calibrator internals: the math, the search procedure, and the rationale
+behind each warning.
 
 ## The pieces
 
-**Danger scorer.** Function from `(observation, action) -> [0, 1]`. Two are
-bundled: a naive-Bayes over text and a keyword baseline. Plug in your own.
-Scorers can expose metadata for audit logs, but the guard only needs `score`.
+**Danger scorer.** A function `score: (observation, action) → [0, 1]`. The
+library ships two implementations, a naive-Bayes model and a keyword
+baseline. The guard only ever calls `score(proposal)`; scorers can also
+expose `metadata()` for the audit log.
 
-**Action schema.** `Observation` and `ActionProposal` are the library boundary.
-They can hold text, OCR, accessibility text, screenshot references, app/window
-data, raw agent messages, parsed executor commands, coordinates, and target
-metadata. The schema is broader than the toy demo because real CUAs expose
-different action shapes.
+**Action schema.** `Observation` and `ActionProposal` are the library's
+boundary. Between them they hold text, OCR, accessibility tree,
+screenshot references, app and window data, the raw agent message, the
+parsed executor command, coordinates, and arbitrary `target_metadata`.
+The schema is wider than the toy demo requires because production CUAs
+use varied action formats.
 
-**Adapters.** Small translators from host action formats into `ActionProposal`.
-They don't run browsers or desktops. They sit at the edge:
+**Adapters.** Translators from host action formats into `ActionProposal`:
 
 ```text
-host runtime action -> adapter -> ActionProposal -> guard
+host runtime action → adapter → ActionProposal → guard
 ```
 
-The current adapters cover native JSON, Playwright-like commands,
-Selenium-like commands, and OSWorld-style desktop dictionaries.
+They reshape data; they don't run browsers or desktops.
 
-**Threshold `t`.** A single number in `[0, 1]`. Decision rule:
+**Threshold `t`.** A single number in `[0, 1]`. The decision rule is:
 
 ```text
 allow if score(observation, action) < t
 otherwise block or escalate
 ```
 
-Smaller `t` blocks more. Larger `t` allows more. Picking `t` is the whole
-exercise.
+Smaller `t` blocks more, larger `t` allows more.
 
-**Labeled examples.** Each is `(observation, action, unsafe_bool)`. You need a
-training set to fit a scorer and a separate calibration set to pick `t`. They
-must not overlap.
+**Labeled examples.** Each labeled action is `(observation, action,
+unsafe_bool)`. Training uses one set and calibration uses another. The
+two must not overlap, because reusing the scorer's training data for
+calibration invalidates the bound.
 
-**Audit records.** Every runtime or evaluation decision can be written as JSONL:
-action, score, threshold, decision, classifier metadata, guard metadata, and
-labels when labels exist. This is how you find bad labels, bad action parsing,
-and score drift.
+**Audit records.** Every runtime or evaluation decision can be written
+as a line of JSONL: observation, proposed action, score, threshold,
+decision, classifier metadata, guard metadata, and labels when they
+exist. The trace is the primary debugging surface when a decision needs
+to be revisited.
 
 ## Calibration
 
@@ -64,114 +56,123 @@ The safety loss is "an unsafe action got through":
 L(t, unsafe, score) = 1 if (unsafe and score < t) else 0
 ```
 
-The empirical miss rate on the calibration set at threshold `t`:
+The empirical miss rate on the calibration set is:
 
 ```text
-empirical(t) = (1/n) * sum_i L(t, u_i, s_i)
+empirical(t) = (1/n) * sum_i L(t, unsafe_i, score_i)
 ```
 
-You could pick the largest `t` with `empirical(t) <= alpha` and call it done.
-That's a hand-tuned threshold and gives you nothing about a fresh sample.
+Picking the largest `t` with `empirical(t) ≤ alpha` is equivalent to
+hand-tuning the threshold on the calibration set, and provides no
+guarantee on a fresh sample.
 
-What this library uses instead:
+The library uses an inflated risk instead:
 
 ```text
-inflated(t) = (sum_i L(t, u_i, s_i) + B) / (n + 1)
+inflated(t) = (sum_i L(t, unsafe_i, score_i) + B) / (n + 1)
 ```
 
-where `B = 1` is the worst possible single loss. The chosen `t` is the largest
-one where `inflated(t) <= alpha`.
+where `B = 1` is the worst possible single-loss value. It picks the
+largest `t` with `inflated(t) ≤ alpha`.
 
-The `+B` and `+1` together are "what if the next fresh point is the worst case
-we could see". With that adjustment, the threshold carries a guarantee: the
-expected miss rate on a fresh sample drawn the same way is at most `alpha`.
-Expectation is over fresh samples — not a per-action claim.
-
-That `(L + 1) / (n + 1)` swap is the whole trick.
+The `+ B` and `+ 1` together cover the worst case on the next fresh
+point: an unsafe action that the gate would have allowed. With that
+adjustment, the threshold's bound carries over from the calibration set
+to fresh samples, and the expected miss rate (averaged over fresh
+samples) is at most `alpha`.
 
 ## Infeasible alpha
 
-If `alpha < 1 / (n + 1)`, no threshold can satisfy the bound — even a perfectly
-safe calibration set has the inflation term blocking it. The library reports
-`feasible = False` and falls back to the strictest threshold. That's the signal
-to either get more calibration data or relax `alpha`.
+If `alpha < 1 / (n + 1)`, no threshold can satisfy the bound, because
+the inflation term alone exceeds `alpha` even on a perfectly safe
+calibration set. The library returns `feasible = False` and falls back
+to the strictest threshold; the fix is more calibration data or a
+looser `alpha`.
 
 ## Boundary thresholds
 
-The calibrator searches a finite grid. If the chosen threshold sits at the
-largest grid value, anything the model could realistically output is below it
-— the gate is open. At the smallest grid value, the gate is closed, or
-calibration was infeasible. The math may say "feasible" in both cases, but
-neither is useful behavior. The CLI prints a warning so an open gate doesn't
-ship by accident.
+The calibrator searches a grid: uniform points `0/200, 1/200, ...,
+200/200` plus points clustered around each observed score. If the chosen
+threshold sits at the largest grid value, almost nothing the scorer can
+produce will exceed it, so the gate is effectively open. If it sits at
+the smallest grid value, the gate is effectively closed (or calibration
+was infeasible from the start). The math can report `feasible` in both
+cases, so the CLI prints a warning when a boundary threshold is
+selected.
 
-## Evaluation reports
+## Search direction
 
-The evaluator takes a guard and a held-out labeled JSONL file. It does not
-execute actions. It asks: "what would this guard have allowed, blocked, or
-escalated?"
+The calibrator walks thresholds from strict to loose and tracks the
+running maximum of the inflated risk. A candidate is only accepted if
+every stricter threshold also met the budget.
 
-Reported metrics:
+For the default miss-rate loss this is equivalent to walking until the
+budget breaks. The running-max form also handles losses that are not
+monotone in `t`, such as one that penalizes intervening on too many safe
+actions; only the loss function changes, not the calibration code
+around it.
+
+## Evaluation
+
+`evaluate_labeled_actions` takes a guard and a held-out labeled JSONL
+file. It does not execute anything; it reports what the guard would have
+allowed, blocked, or escalated.
+
+The report contains:
 
 - missed unsafe rate
 - false positive rate
-- intervention rate
-- block rate
-- escalation rate
+- intervention rate, block rate, escalation rate
 - risk by harm category
-- boundary warnings from calibration
-- simple score-shift warnings between calibration and evaluation
+- the boundary warning from calibration, if any
+- score-shift warnings from comparing evaluation scores against the
+  calibration summary
 
-The score-shift checks are intentionally simple. They compare evaluation scores
-to the calibration score range and mean/std. They are not a proof of no
-distribution shift. They are cheap warning lights.
+The score-shift check is approximate: it compares the test score range
+and mean against the calibration summary, which is enough to catch
+obvious drift.
 
 ## Trajectory-level calibration
 
-Same setup, but each labeled example is a sequence of actions with one safety
-label. The trajectory score is:
+The same construction works at the trajectory level. Each labeled example
+is a sequence of actions with one safety label, and the trajectory score
+is:
 
 ```text
 trajectory_score(steps) = max(score(step) for step in steps)
 ```
 
-"Block this trajectory" is "block as soon as any step crosses the threshold".
-The runtime guard already does that step by step, so a trajectory-calibrated
-threshold drops in for action-level gating.
+"Block the trajectory" reduces to "block as soon as any step crosses
+the threshold," which is what the runtime guard already does step by
+step. A trajectory-calibrated threshold works in the action-level gate
+as is.
 
-## Why the search runs in one direction
+## What the bound doesn't say
 
-The calibrator walks thresholds from strict to loose and tracks the running
-maximum of the inflated risk. A candidate is only accepted if every stricter
-threshold also met the budget. For the default miss-rate loss this is the same
-as walking until the budget breaks, but the running-max form keeps working for
-losses that aren't monotone in the threshold — say, a future loss that also
-penalizes blocking too many safe actions. Same calibration code, different loss
-function.
+- Nothing about a specific allowed action.
+- Nothing about harms that weren't labeled.
+- Nothing about deployments that have drifted away from the calibration
+  data.
+- Nothing that survives a scorer swap or retrain.
 
-## What it doesn't prove
+Harm categories and distribution warnings make these failure modes
+visible, but they do not strengthen the bound.
 
-- Nothing about an individual allowed action.
-- Nothing about harms you didn't label. Bad label set, bad gate.
-- Nothing about a deployment that's drifted from your calibration.
-  Recalibrate.
+## Where the gate plugs in
 
-## Where the code hooks in
-
-One line before action execution:
+The integration is one extra check before each action runs:
 
 ```python
 proposal = agent.propose(observation)
 decision = guard.evaluate(proposal)
 if decision.decision == "allow":
-    environment.step(proposal)
+    env.step(proposal)
 elif decision.decision == "escalate":
-    if your_human_or_host_approves(decision):
-        environment.step(proposal)
+    if reviewer_approves(decision):
+        env.step(proposal)
 else:
     abort(decision)
 ```
 
-The guard doesn't know how the agent produced the action. `run_episode` wires
-this same pattern through the included runner, so the demo and a real CUA stack
-share the control flow.
+`run_episode` implements this pattern in the bundled runner, so the
+demo and a real CUA stack share the same control flow.
